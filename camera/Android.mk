@@ -36,7 +36,12 @@ LOCAL_SRC_FILES:= \
 	camera2/OutputConfiguration.cpp \
 	CameraBase.cpp \
 	CameraUtils.cpp \
-	VendorTagDescriptor.cpp
+	VendorTagDescriptor.cpp \
+
+ifeq ($(BOARD_HAS_MTK_HARDWARE),true)
+	LOCAL_SRC_FILES += \
+		MtkCameraParameters.cpp
+endif
 
 LOCAL_SHARED_LIBRARIES := \
 	libcutils \
