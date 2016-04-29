@@ -65,6 +65,10 @@ LOCAL_MODULE:= libmediaplayerservice
 
 #LOCAL_32_BIT_ONLY := true
 
+ifeq ($(MTK_HARDWARE),true)
+    LOCAL_SHARED_LIBRARIES += libmtkplayer
+endif
+
 ifeq ($(TARGET_BOARD_PLATFORM),msm8974)
     LOCAL_CFLAGS += -DTARGET_8974
 endif

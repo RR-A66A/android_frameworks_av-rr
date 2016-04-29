@@ -34,6 +34,10 @@
 #include "nuplayer/NuPlayerDriver.h"
 #include <mediaplayerservice/AVMediaServiceExtensions.h>
 
+#ifdef MTK_HARDWARE
+#include "FMAudioPlayer.h"
+#endif
+
 namespace android {
 
 Mutex MediaPlayerFactory::sLock;
@@ -241,6 +245,25 @@ class TestPlayerFactory : public MediaPlayerFactory::IFactory {
     }
 };
 
+#ifdef MTK_HARDWARE
+class FMPlayerFactory : public MediaPlayerFactory::IFactory {
+  public:
+    virtual float scoreFactory(const sp<IMediaPlayer>& /*client*/,
+                               const char* url,
+                               float /*curScore*/) {
+        if(strncmp(url, "MEDIATEK://MEDIAPLAYER_PLAYERTYPE_FM", 38) == 0)
+           return 1.0;
+        return 0.0;
+    }
+
+    virtual sp<MediaPlayerBase> createPlayer(pid_t /*pid*/) {
+        ALOGV("Create FM Player");
+        return new FMAudioPlayer();
+        return NULL;
+    }
+};
+#endif
+
 void MediaPlayerFactory::registerBuiltinFactories() {
 
     MediaPlayerFactory::IFactory* pCustomFactory = NULL;
@@ -251,6 +274,9 @@ void MediaPlayerFactory::registerBuiltinFactories() {
 
     registerFactory_l(new NuPlayerFactory(), NU_PLAYER);
     registerFactory_l(new TestPlayerFactory(), TEST_PLAYER);
+#ifdef MTK_HARDWARE
+    registerFactory_l(new FMPlayerFactory(), FM_AUDIO_PLAYER);
+#endif
     AVMediaServiceUtils::get()->getDashPlayerFactory(pCustomFactory, DASH_PLAYER);
     if(pCustomFactory != NULL) {
         ALOGV("Registering DASH_PLAYER");

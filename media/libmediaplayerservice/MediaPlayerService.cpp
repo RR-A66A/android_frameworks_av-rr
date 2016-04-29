@@ -721,6 +721,21 @@ status_t MediaPlayerService::Client::setDataSource(
         return mStatus;
     } else {
         player_type playerType = MediaPlayerFactory::getPlayerType(this, url);
+
+#ifdef MTK_HARDWARE
+        ALOGD("player type = %d", playerType);
+
+        if(playerType == FM_AUDIO_PLAYER)
+        {
+        	  sp<MediaPlayerBase> p = createPlayer(playerType);
+        	  if (p == NULL) return NO_INIT;
+
+            if (!p->hardwareOutput()) {
+              mAudioOutput = new AudioOutput(mAudioSessionId, IPCThreadState::self()->getCallingUid(),mPid, mAudioAttributes);
+              static_cast<MediaPlayerInterface*>(p.get())->setAudioSink(mAudioOutput);
+            }
+        }
+#endif
         sp<MediaPlayerBase> p = setDataSource_pre(playerType);
         if (p == NULL) {
             return NO_INIT;
