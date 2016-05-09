@@ -989,6 +989,24 @@ status_t AudioFlinger::setStreamVolume(audio_stream_type_t stream, float value,
         thread->setStreamVolume(stream, value);
     }
 
+#ifdef MTK_HARDWARE
+    if(stream == AUDIO_STREAM_MUSIC)
+    {
+        sp<ThreadBase> thread;
+        thread = checkPlaybackThread_l(output);
+        if (thread == primaryPlaybackThread_l())
+        {
+            ALOGV("setStreamVolume FM  value = %f",value);
+            audio_hw_device_t *dev = mPrimaryHardwareDev->hwDevice();
+            dev->set_parameters (dev,String8::format("SetFmVolume=%f",value));
+        }
+        else
+        {
+            ALOGV("Invalid setStreamVolume FM  value = %f",value);
+        }
+    }
+#endif
+
     return NO_ERROR;
 }
 
