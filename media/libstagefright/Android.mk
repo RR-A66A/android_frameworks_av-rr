@@ -208,6 +208,22 @@ LOCAL_C_INCLUDES += \
 	$(TOP)/hardware/samsung/exynos4/include
 endif
 
+ifeq ($(MTK_HARDWARE),true)
+        LOCAL_C_INCLUDES += \
+        $(TOP)/frameworks/av/include/mediatek/dpframework \
+        $(TOP)/frameworks/av/include/mediatek/mhal
+endif
+
+ifeq ($(MTK_HARDWARE),true)
+ifeq ($(strip $(MTK_DP_FRAMEWORK)),yes)
+LOCAL_SHARED_LIBRARIES += \
+    libdpframework
+else
+LOCAL_SHARED_LIBRARIES += \
+    libmhal
+endif
+endif
+
 LOCAL_MODULE:= libstagefright
 
 LOCAL_MODULE_TAGS := optional

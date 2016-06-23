@@ -785,6 +785,16 @@ static size_t getFrameSize(
         * this part in the future
         */
         case OMX_COLOR_FormatAndroidOpaque:
+#ifdef MTK_HARDWARE
+            /*
+             * FIXME: We use this FrameSize for temp solution
+             * in order to check functionality,
+             * and we need to get FrameSize accurately in the future
+             */
+        case OMX_MTK_COLOR_FormatYV12:
+        case OMX_COLOR_FormatVendorMTKYUV:
+        case OMX_COLOR_FormatVendorMTKYUV_FCM:
+#endif
             return (width * height * 3) / 2;
 
         default:
@@ -803,6 +813,15 @@ status_t OMXCodec::findTargetColorFormat(
     int32_t targetColorFormat;
     if (meta->findInt32(kKeyColorFormat, &targetColorFormat)) {
         *colorFormat = (OMX_COLOR_FORMATTYPE) targetColorFormat;
+#ifdef MTK_HARDWARE
+        /*
+         * FIXME: Test, Must remove
+         */
+#if 0
+        CODEC_LOGI("[findTargetColorFormat] colorFormat = OMX_MTK_COLOR_FormatYV12\n");
+        *colorFormat = (OMX_COLOR_FORMATTYPE) OMX_MTK_COLOR_FormatYV12;
+#endif
+#endif
     }
 
     // Check whether the target color format is supported.
@@ -1296,6 +1315,20 @@ status_t OMXCodec::setVideoOutputFormat(
         CHECK_EQ(err, (status_t)OK);
         CHECK_EQ((int)format.eCompressionFormat, (int)OMX_VIDEO_CodingUnused);
 
+#if 0 //KitKat cancel this check start
+        CHECK(format.eColorFormat == OMX_COLOR_FormatYUV420Planar
+              || format.eColorFormat == OMX_COLOR_FormatYUV420SemiPlanar
+              || format.eColorFormat == OMX_COLOR_FormatCbYCrY
+              || format.eColorFormat == OMX_TI_COLOR_FormatYUV420PackedSemiPlanar
+#ifdef MTK_AOSP_ENHANCEMENT
+              || format.eColorFormat == OMX_MTK_COLOR_FormatYV12
+              || format.eColorFormat == OMX_COLOR_FormatVendorMTKYUV
+              || format.eColorFormat == OMX_COLOR_Format32bitARGB8888
+#endif
+              || format.eColorFormat == OMX_QCOM_COLOR_FormatYVU420SemiPlanar
+              || format.eColorFormat == OMX_QCOM_COLOR_FormatYUV420PackedSemiPlanar64x32Tile2m8ka);
+#endif //KitKat cancel this check end
+
         int32_t colorFormat;
         if (meta->findInt32(kKeyColorFormat, &colorFormat)
                 && colorFormat != OMX_COLOR_FormatUnused
@@ -1773,6 +1806,27 @@ status_t OMXCodec::allocateOutputBuffersFromNativeWindow() {
         return err;
     }
 
+#ifdef MTK_HARDWARE
+    uint32_t eHalColorFormat = HAL_PIXEL_FORMAT_YV12;
+    switch (def.format.video.eColorFormat) {
+        case OMX_COLOR_FormatYUV420Planar:
+            eHalColorFormat = HAL_PIXEL_FORMAT_I420;
+            break;
+        case OMX_COLOR_FormatVendorMTKYUV:
+            eHalColorFormat = HAL_PIXEL_FORMAT_NV12_BLK;
+            break;
+        case OMX_MTK_COLOR_FormatYV12:
+            eHalColorFormat = HAL_PIXEL_FORMAT_YV12;
+            break;
+        case OMX_COLOR_Format32bitARGB8888:
+            eHalColorFormat = HAL_PIXEL_FORMAT_RGBA_8888;
+            break;
+        default:
+            eHalColorFormat = HAL_PIXEL_FORMAT_I420;
+            break;
+    }
+#endif //MTK_HARDWARE
+
     sp<MetaData> meta = mSource->getFormat();
 
     int32_t rotationDegrees;
@@ -1810,7 +1864,11 @@ status_t OMXCodec::allocateOutputBuffersFromNativeWindow() {
             def.format.video.nFrameWidth,
             def.format.video.nFrameHeight,
 #endif
+#ifdef MTK_HARDWARE
+            eHalColorFormat,
+#else
             def.format.video.eColorFormat,
+#endif //MTK_HARDWARE
             rotationDegrees,
             usage | GRALLOC_USAGE_HW_TEXTURE | GRALLOC_USAGE_EXTERNAL_DISP);
     if (err != 0) {

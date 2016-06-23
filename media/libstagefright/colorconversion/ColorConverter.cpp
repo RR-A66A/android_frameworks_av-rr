@@ -22,6 +22,27 @@
 #include <media/stagefright/ColorConverter.h>
 #include <media/stagefright/MediaErrors.h>
 
+#ifdef MTK_HARDWARE
+#include "OMX_IVCommon.h"
+#include <ctype.h>
+#include <cutils/properties.h>
+
+#define MEM_ALIGN_32              32
+#define BITBLT_TRYALLOCMEMCOUNT   200
+
+#ifdef MTK_USEDPFRMWK
+#include "DpBlitStream.h"
+#else
+#include "MediaHal.h"
+#endif
+
+#endif
+#ifdef MTK_HARDWARE
+#include <stdio.h>
+#include <cutils/properties.h>
+#include <utils/Timers.h>
+#endif
+
 namespace android {
 
 ColorConverter::ColorConverter(
@@ -37,9 +58,18 @@ ColorConverter::~ColorConverter() {
 }
 
 bool ColorConverter::isValid() const {
+#ifdef MTK_HARDWARE
+	ALOGD ("isValid: src format: 0x%x, Dst format: 0x%x", 
+		mSrcFormat, mDstFormat);
+    if ((mDstFormat != OMX_COLOR_Format16bitRGB565) && (mDstFormat != OMX_COLOR_Format32bitARGB8888)) {
+		
+			return false;
+		}
+#else
     if (mDstFormat != OMX_COLOR_Format16bitRGB565) {
         return false;
     }
+#endif
 
     switch (mSrcFormat) {
         case OMX_COLOR_FormatYUV420Planar:
@@ -47,6 +77,12 @@ bool ColorConverter::isValid() const {
         case OMX_QCOM_COLOR_FormatYVU420SemiPlanar:
         case OMX_COLOR_FormatYUV420SemiPlanar:
         case OMX_TI_COLOR_FormatYUV420PackedSemiPlanar:
+#ifdef MTK_HARDWARE
+        case OMX_COLOR_Format32bitARGB8888:
+        case OMX_MTK_COLOR_FormatYV12:
+        case OMX_COLOR_FormatVendorMTKYUV:
+        case OMX_COLOR_FormatVendorMTKYUV_FCM:
+#endif
             return true;
 
         default:
@@ -85,9 +121,15 @@ status_t ColorConverter::convert(
         size_t dstWidth, size_t dstHeight,
         size_t dstCropLeft, size_t dstCropTop,
         size_t dstCropRight, size_t dstCropBottom) {
+#ifdef MTK_HARDWARE
+    if ((mDstFormat != OMX_COLOR_Format16bitRGB565) && (mDstFormat != OMX_COLOR_Format32bitARGB8888)) {
+		return ERROR_UNSUPPORTED;
+    }
+#else
     if (mDstFormat != OMX_COLOR_Format16bitRGB565) {
         return ERROR_UNSUPPORTED;
     }
+#endif
 
     BitmapParams src(
             const_cast<void *>(srcBits),
@@ -103,7 +145,11 @@ status_t ColorConverter::convert(
 
     switch (mSrcFormat) {
         case OMX_COLOR_FormatYUV420Planar:
+#ifdef MTK_HARDWARE
+            err = convertYUVToRGBHW(src, dst);
+#else 
             err = convertYUV420Planar(src, dst);
+#endif
             break;
 
         case OMX_COLOR_FormatCbYCrY:
@@ -121,6 +167,15 @@ status_t ColorConverter::convert(
         case OMX_TI_COLOR_FormatYUV420PackedSemiPlanar:
             err = convertTIYUV420PackedSemiPlanar(src, dst);
             break;
+
+#ifdef MTK_HARDWARE 
+        case OMX_MTK_COLOR_FormatYV12:
+        case OMX_COLOR_FormatVendorMTKYUV:
+        case OMX_COLOR_FormatVendorMTKYUV_FCM:
+        case OMX_COLOR_Format32bitARGB8888:
+            err = convertYUVToRGBHW(src, dst);
+            break;
+#endif
 
         default:
         {
@@ -521,4 +576,470 @@ uint8_t *ColorConverter::initClip() {
     return &mClip[-kClipMin];
 }
 
+#ifdef MTK_HARDWARE
+// convert MTKYUV to RGB565 (SW)
+bool ColorConverter::SWYUVToRGBConversion(const BitmapParams &src, const BitmapParams &dst)
+{
+    status_t err;
+
+    if (mDstFormat == OMX_COLOR_Format16bitRGB565) {
+        err = convertYUV420Planar(src, dst);
+    }
+    else if (mDstFormat == OMX_COLOR_Format32bitARGB8888) {
+        err = convertYUV420PlanarToABGR8888(src, dst);
+    }
+    else {
+        ALOGE ("[ERROR] Unsupported dst format (0x%08X) in SWYUVToRGBConversion", mDstFormat);
+        err = ERROR_UNSUPPORTED;
+    }
+
+    if (err == OK) {
+        return true;
+    }
+    else {
+        return false;
+    }
+}
+
+#ifndef MTK_USEDPFRMWK
+// convert MTKYUV/YUV420 to RGB565/ARGB8888 (HW)
+bool ColorConverter::HWYUVToRGBConversion(const BitmapParams &src, const BitmapParams &dst)
+{
+    MHAL_UINT8 *YUVbuf_va = NULL;
+    MHAL_UINT8 *YUVbuf_pa = NULL;
+    MHAL_UINT8 *RGBbuf_va = NULL;
+    MHAL_UINT8 *RGBbuf_pa = NULL;
+    MHAL_UINT32 BufferSize = 0;
+    mHalBltParam_t bltParam;
+
+    MHAL_UINT32 u4TryAllocMemCount;
+    bool bRetVal;
+
+    memset(&bltParam, 0, sizeof(bltParam));
+
+    u4TryAllocMemCount = BITBLT_TRYALLOCMEMCOUNT;
+    YUVbuf_va = NULL;
+
+    int srcWidth = src.cropWidth();
+    int srcHeight = src.cropHeight();
+    int srcWStride = (srcWidth + 15) & 0xFFFFFFF0;
+    int srcHStride = (srcHeight + 15) & 0xFFFFFFF0;
+    int dstWidth = dst.cropWidth();
+    int dstHeight = dst.cropHeight();
+
+    ALOGD("HWYUVToRGBConversion, tid:%d, CropLeft(%d), CropTop(%d), srcWidth(%d), srcHeight(%d), dstWidth(%d), dstHeight(%d), mSrcFormat(%d), mDstFormat(%d)",
+        gettid(), src.mCropLeft, src.mCropTop, srcWidth, srcHeight, dstWidth, dstHeight, mSrcFormat, mDstFormat);
+       
+    while (u4TryAllocMemCount) {
+        BufferSize = ((((srcWStride * srcHStride * 3) >> 1)+(MEM_ALIGN_32-1)) & ~(MEM_ALIGN_32-1));
+        YUVbuf_va = (MHAL_UINT8 *)memalign(MEM_ALIGN_32, BufferSize);    // 16 byte alignment for MDP
+
+        if (YUVbuf_va == NULL) {
+            ALOGE("Alloc YUVbuf_va fail %d times!!, Try alloc again!!", (BITBLT_TRYALLOCMEMCOUNT-u4TryAllocMemCount));
+            u4TryAllocMemCount--;
+            usleep(10*1000);
+        }
+        else {
+            ALOGD("Alloc YUVbuf_va 0x%08x Success, size (%u)", (MHAL_UINT32)YUVbuf_va, BufferSize);
+            break;
+        }
+    }
+
+    if (YUVbuf_va == NULL) {
+        ALOGE("Alloc YUVbuf_va fail %d times!!, Return error!!\n", BITBLT_TRYALLOCMEMCOUNT);
+        return false;
+    }
+
+    u4TryAllocMemCount = BITBLT_TRYALLOCMEMCOUNT;
+    RGBbuf_va = NULL;
+            
+    while (u4TryAllocMemCount) {
+        switch (mDstFormat) {
+            case OMX_COLOR_Format16bitRGB565:
+                BufferSize = (((dstWidth * dstHeight * 2)+(MEM_ALIGN_32-1)) & ~(MEM_ALIGN_32-1));
+                break;
+            case OMX_COLOR_Format32bitARGB8888:
+                BufferSize = (((dstWidth * dstHeight * 4)+(MEM_ALIGN_32-1)) & ~(MEM_ALIGN_32-1));
+                break;
+            default:
+                ALOGE ("[ERROR] Unsupported dest format A (%d)", mDstFormat);
+                free (YUVbuf_va);
+                return false;
+            }
+        
+        RGBbuf_va = (MHAL_UINT8 *)memalign(MEM_ALIGN_32, BufferSize);
+    
+        if (RGBbuf_va == NULL){
+            ALOGE("Alloc RGBbuf_va fail %d times!!, Try alloc again!!", (BITBLT_TRYALLOCMEMCOUNT-u4TryAllocMemCount));
+            u4TryAllocMemCount--;
+            usleep(10*1000);
+        }
+        else {
+            ALOGD("Alloc RGBbuf_va 0x%08x Success, size (%u)", (MHAL_UINT32)RGBbuf_va, BufferSize);
+            break;
+        }
+    }
+    
+    if (RGBbuf_va == NULL) {
+        ALOGE("Alloc RGBbuf_va fail %d times!!, Return error!!\n", BITBLT_TRYALLOCMEMCOUNT);
+        return false;
+    }
+
+    memcpy(YUVbuf_va, src.mBits,((srcWStride * srcHStride * 3) >> 1));
+    bltParam.srcAddr = (MHAL_UINT32)YUVbuf_va;
+
+    switch (mSrcFormat) {
+        case OMX_COLOR_FormatYUV420Planar:
+            bltParam.srcFormat = MHAL_FORMAT_YUV_420;
+            break;
+
+        case OMX_MTK_COLOR_FormatYV12:
+            /*
+             * FIXME: Need to set bltParam.srcFormat = MHAL_FORMAT_IMG_YV12;
+             */  
+            bltParam.srcFormat = MHAL_FORMAT_YUV_420;
+            //bltParam.srcFormat = MHAL_FORMAT_IMG_YV12;
+            break;
+
+        default:
+            ALOGE ("[ERROR] Unsupported source format (%d)", mSrcFormat);
+            bltParam.srcFormat = MHAL_FORMAT_YUV_420;
+            break;
+    }
+
+    bltParam.srcX = src.mCropLeft;
+    bltParam.srcY = src.mCropTop;
+    bltParam.srcW = srcWidth;
+    bltParam.srcWStride = srcWStride;
+    bltParam.srcH = srcHeight;
+    bltParam.srcHStride = srcHStride;
+
+    bltParam.dstAddr = (MHAL_UINT32)RGBbuf_va;
+
+    switch (mDstFormat) {
+        case OMX_COLOR_Format16bitRGB565:
+            bltParam.dstFormat = MHAL_FORMAT_RGB_565;
+            break;
+        case OMX_COLOR_Format32bitARGB8888:
+            bltParam.dstFormat = MHAL_FORMAT_ABGR_8888;
+            break;
+        default:
+            ALOGE ("[ERROR] Unsupported dest format (%d)", mDstFormat);
+            bltParam.dstFormat = MHAL_FORMAT_RGB_565;
+            break;
+    }
+
+    bltParam.dstW = dstWidth;
+    bltParam.dstH = dstHeight;
+    bltParam.pitch = dstWidth; //_mDisp.dst_pitch;
+    //bltParam.orientation = _mRotation;
+    bltParam.orientation = 0;
+
+    bltParam.doImageProcess = 1;
+
+#if 0
+    ALOGE("bltParam.srcX = %d",bltParam.srcX);
+    ALOGE("bltParam.srcY = %d",bltParam.srcY);
+    ALOGE("bltParam.srcW = %d",bltParam.srcW);
+    ALOGE("bltParam.srcWStride = %d",bltParam.srcWStride);
+    ALOGE("bltParam.srcH = %d",bltParam.srcH);
+    ALOGE("bltParam.srcHStride = %d",bltParam.srcHStride);
+    ALOGE("bltParam.dstW = %d",bltParam.dstW);
+    ALOGE("bltParam.dstH = %d",bltParam.dstH);
+    ALOGE("bltParam.pitch = %d",bltParam.pitch);
+#endif
+
+    if (MHAL_NO_ERROR != mHalIoCtrl(MHAL_IOCTL_BITBLT, &bltParam, sizeof(bltParam), NULL, 0, NULL)) {
+        ALOGE("[BITBLT][ERROR] IDP_bitblt() can't do bitblt operation, use SW conversion");
+        free (RGBbuf_va);
+        free (YUVbuf_va);
+        bRetVal = SWYUVToRGBConversion(src, dst);
+        return bRetVal;
+    }
+    else {
+        switch (mDstFormat) {
+            case OMX_COLOR_Format16bitRGB565:
+                memcpy(dst.mBits, RGBbuf_va, (dstWidth * dstHeight * 2));
+                break;
+            case OMX_COLOR_Format32bitARGB8888:
+                memcpy(dst.mBits, RGBbuf_va, (dstWidth * dstHeight * 4));
+                break;
+            default:
+                ALOGE ("[ERROR] Unsupported dest format B (%d)", mDstFormat);
+                free (RGBbuf_va);
+                free (YUVbuf_va);
+                return false;
+        }
+        
+        free (RGBbuf_va);
+        free (YUVbuf_va);
+        return true;
+    }
+    
+    return true;
+}
+#endif
+
+status_t ColorConverter::convertYUVToRGBHW(const BitmapParams &src, const BitmapParams &dst)
+{
+#ifdef MTK_USEDPFRMWK
+	ALOGD("srcWidth(%d), srcHeight(%d), srcCropLeft(%d), srcCropTop(%d), srcCropRight(%d), srcCropBottom(%d)",
+       src.mWidth, src.mHeight, src.mCropLeft, src.mCropTop, src.mCropRight, src.mCropBottom);
+    ALOGD("dstWidth(%d), dstHeight(%d), dstCropLeft(%d), dstCropTop(%d), dstCropRight(%d), dstCropBottom(%d)",
+       dst.mWidth, dst.mHeight, dst.mCropLeft, dst.mCropTop, dst.mCropRight, dst.mCropBottom);
+    DpBlitStream blitStream;
+//    int srcWidth = src.cropWidth();
+//    int srcHeight = src.cropHeight();
+    unsigned int srcWStride = src.mWidth; 
+    unsigned int srcHStride = src.mHeight; 
+	
+    DpRect srcRoi;
+    srcRoi.x = 0;
+    srcRoi.y = 0;
+    srcRoi.w = dst.mWidth;
+    srcRoi.h = dst.mHeight;
+    ALOGD("src stride aligned, w(%d), h(%d)", srcWStride, srcHStride);
+
+    unsigned int dstWStride = dst.mWidth ;
+    unsigned int dstHStride = dst.mHeight ;
+	char name_yuv[100];
+	char retriever_yuv_propty[100];
+	char name_rgb[100];
+	char retriever_propty_rgb[100];
+	
+    if (mSrcFormat == OMX_COLOR_FormatYUV420Planar) {
+	char* planar[3];
+	unsigned int length[3];
+	planar[0] = (char*)src.mBits;
+	length[0] = srcWStride*srcHStride;
+	planar[1] = planar[0] + length[0];
+	length[1] = srcWStride*srcHStride/4;
+	planar[2] = planar[1] + length[1];
+	length[2] = length[1];
+	ALOGD("Yaddr(%p), Uaddr(%p), Vaddr(%p) YUV420P", planar[0], planar[1], planar[2]);
+	ALOGD("Ylen(%d), Ulen(%d), Vlen(%d)", length[0], length[1], length[2]);
+
+	blitStream.setSrcBuffer((void**)planar, (unsigned int*)length, 3);
+	blitStream.setSrcConfig(srcWStride, srcHStride, eYUV_420_3P, eInterlace_None, &srcRoi);
+    }
+	if (mSrcFormat == OMX_MTK_COLOR_FormatYV12) {
+	char* planar[3];
+	unsigned int length[3];
+	planar[0] = (char*)src.mBits;
+	length[0] = srcWStride*srcHStride;
+	planar[1] = planar[0] + length[0];
+	length[1] = srcWStride*srcHStride/4;
+	planar[2] = planar[1] + length[1];
+	length[2] = length[1];
+	ALOGD("Yaddr(%p), Uaddr(%p), Vaddr(%p) YV12", planar[0], planar[1], planar[2]);
+	ALOGD("Ylen(%d), Ulen(%d), Vlen(%d)", length[0], length[1], length[2]);
+
+	blitStream.setSrcBuffer((void**)planar, (unsigned int*)length, 3);
+	blitStream.setSrcConfig(srcWStride, srcHStride, eYV12, eInterlace_None, &srcRoi);
+    }
+    else if (mSrcFormat == OMX_COLOR_FormatVendorMTKYUV) {
+	char* planar[2];
+	unsigned int length[2];
+	planar[0] = (char*)src.mBits;
+	length[0] = srcWStride*srcHStride;
+	planar[1] = planar[0] + length[0];
+	length[1] = srcWStride*srcHStride/2;
+	ALOGD("Yaddr(%p), Caddr(%p)", planar[0], planar[1]);
+	ALOGD("Ylen(%d), Clen(%d)", length[0], length[1]);
+
+	blitStream.setSrcBuffer((void**)planar, (unsigned int*)length, 2);
+	//blitStream.setSrcConfig(srcWStride, srcHStride, eNV12_BLK, eInterlace_None, &srcRoi);	
+        blitStream.setSrcConfig(srcWStride, srcHStride, srcWStride * 32, srcWStride * 16, eNV12_BLK, DP_PROFILE_BT601, eInterlace_None, &srcRoi);
+	
+    }
+    else if (mSrcFormat == OMX_COLOR_FormatVendorMTKYUV_FCM) {
+	char* planar[2];
+	unsigned int length[2];
+	planar[0] = (char*)src.mBits;
+	length[0] = srcWStride*srcHStride;
+	planar[1] = planar[0] + length[0];
+	length[1] = srcWStride*srcHStride/2;
+	ALOGD("Yaddr(%p), Caddr(%p)", planar[0], planar[1]);
+	ALOGD("Ylen(%d), Clen(%d)", length[0], length[1]);
+
+	blitStream.setSrcBuffer((void**)planar, (unsigned int*)length, 2);
+	//blitStream.setSrcConfig(srcWStride, srcHStride, eNV12_BLK_FCM, eInterlace_None, &srcRoi);
+	blitStream.setSrcConfig(srcWStride, srcHStride, srcWStride * 32, srcWStride * 16, eNV12_BLK_FCM, DP_PROFILE_BT601, eInterlace_None, &srcRoi);
+    }
+	else if (mSrcFormat == OMX_COLOR_Format32bitARGB8888) {
+	char* planar[1];
+	unsigned int length[1];
+	planar[0] = (char*)src.mBits;
+	length[0] = srcWStride*srcHStride*4;
+	blitStream.setSrcBuffer((void**)planar, (unsigned int*)length, 1);
+        blitStream.setSrcConfig(srcWStride, srcHStride, eRGBA8888, eInterlace_None, &srcRoi);
+    }
+
+    ALOGD("dst addr(%p), w(%d), h(%d)", dst.mBits, dstWStride, dstHStride);
+    if (mDstFormat == OMX_COLOR_Format16bitRGB565) {
+	blitStream.setDstBuffer(dst.mBits, dst.mWidth * dst.mHeight * 2);
+	blitStream.setDstConfig(dst.mWidth, dst.mHeight, eRGB565);
+    }
+    else if (mDstFormat == OMX_COLOR_Format32bitARGB8888) {
+	blitStream.setDstBuffer(dst.mBits, dst.mWidth * dst.mHeight * 4);
+//	blitStream.setDstConfig(dst.mWidth, dst.mHeight, eARGB8888);
+	blitStream.setDstConfig(dst.mWidth, dst.mHeight, eRGBA8888);
+    }
+    
+	sprintf(name_yuv, "/sdcard/retriever_%lld_%u_%u.yuv",systemTime(),src.mWidth,src.mHeight);
+	sprintf(retriever_yuv_propty, "retriever.dump.yuv");		
+	dumpColorConverterData(name_yuv,src.mBits,(src.mWidth*src.mHeight)*(size_t)3/(size_t)2,retriever_yuv_propty);
+
+    //Add Sharpness in Video Thumbnail
+    blitStream.setTdshp(1);
+    bool bRet = blitStream.invalidate();
+    ALOGI("blitStream return %d.", bRet);
+
+	sprintf(name_rgb, "/sdcard/retriever_%lld_%u_%u.rgb",systemTime(),dst.mWidth,dst.mHeight);
+	sprintf(retriever_propty_rgb, "retriever.dump.rgb");
+	if (mDstFormat == OMX_COLOR_Format16bitRGB565){
+		dumpColorConverterData(name_rgb,dst.mBits, dst.mWidth*dst.mHeight*2, retriever_propty_rgb); 
+	}else if(mDstFormat == OMX_COLOR_Format32bitARGB8888){
+		dumpColorConverterData(name_rgb,dst.mBits, dst.mWidth*dst.mHeight*4, retriever_propty_rgb); 
+	}
+	
+	if(!bRet)
+		return OK;
+	else
+		return UNKNOWN_ERROR;
+	// debug: dump output buffer
+/*	sprintf(name, "/sdcard/clrcvt_output_%d_dmp", i);
+	fp = fopen(name, "w");
+	if (mDstFormat == OMX_COLOR_Format16bitRGB565)
+		fwrite(dst.mBits, dst.mWidth*dst.mHeight*2, 1, fp);
+	else if (mDstFormat == OMX_COLOR_Format32bitARGB8888)
+		fwrite(dst.mBits, dst.mWidth*dst.mHeight*4, 1, fp);
+	fclose(fp);
+	i++;
+*/
+#else
+    
+    MHAL_BOOL LockScenario = MHAL_FALSE;
+    MHalLockParam_t inLockParam;
+    inLockParam.mode = MHAL_MODE_BITBLT;
+    inLockParam.waitMilliSec = 1000;
+    inLockParam.waitMode = MHAL_MODE_BITBLT;
+    if(MHAL_NO_ERROR != mHalIoCtrl(MHAL_IOCTL_LOCK_RESOURCE, (MHAL_VOID *)&inLockParam, sizeof(inLockParam), NULL, 0, NULL))
+    {
+        ALOGE("[BITBLT][ERROR] mHalIoCtrl() - MT65XX_HW_BITBLT Can't Lock!!!!, TID:%d", gettid());
+        LockScenario = MHAL_FALSE;
+    }
+    else
+    {
+        ALOGE("[BITBLT] mHalIoCtrl() - MT65XX_HW_BITBLT Lock!!!!, TID:%d", gettid());
+        LockScenario = MHAL_TRUE;
+    }
+
+    if (LockScenario == MHAL_TRUE)
+    {
+        MHAL_BOOL bflag;
+        bflag = HWYUVToRGBConversion(src, dst);
+
+        MHAL_UINT32 lock_mode;
+        lock_mode = MHAL_MODE_BITBLT;
+
+        if(MHAL_NO_ERROR != mHalIoCtrl(MHAL_IOCTL_UNLOCK_RESOURCE, (MHAL_VOID *)&lock_mode, sizeof(lock_mode), NULL, 0, NULL))
+        {
+            ALOGD("[BITBLT][ERROR] mHalIoCtrl() - MT65XX_HW_BITBLT Can't UnLock!!!!, TID:%d", gettid());
+        }
+        else
+        {
+            ALOGD("[BITBLT] mHalIoCtrl() - MT65XX_HW_BITBLT UnLock!!!!, TID:%d", gettid());
+        }   
+    }
+    else
+    {
+        ALOGD("Cannot lock HW, use SW converter!!!!, TID:%d", gettid());
+        SWYUVToRGBConversion(src, dst);
+    }
+#endif
+    return OK;
+}
+
+
+status_t ColorConverter::convertYUV420PlanarToABGR8888(const BitmapParams &src, const BitmapParams &dst) {
+
+    ALOGD ("ColorConverter::convertYUV420PlanarToABGR8888(SW) src.cropWidth(%d), src.cropHeight(%d), dst.cropWidth(%d), dst.cropHeight(%d)",
+        src.cropWidth(), src.cropHeight(), dst.cropWidth(), dst.cropHeight());
+
+    if (!((src.mCropLeft & 1) == 0
+            && src.cropWidth() == dst.cropWidth()
+            && src.cropHeight() == dst.cropHeight())) {
+        return ERROR_UNSUPPORTED;
+    }
+
+    uint8_t *kAdjustedClip = initClip();
+
+    uint32_t *dst_ptr = (uint32_t *)dst.mBits + dst.mCropTop * dst.mWidth + dst.mCropLeft;
+    
+    const uint8_t *src_y =  (const uint8_t *)src.mBits + src.mCropTop * src.mWidth + src.mCropLeft;
+
+    const uint8_t *src_u =
+       (const uint8_t *)src_y + src.mWidth * src.mHeight
+        + src.mCropTop * (src.mWidth / 2) + src.mCropLeft / 2;
+
+    const uint8_t *src_v =
+       src_u + (src.mWidth / 2) * (src.mHeight / 2);
+
+    for (size_t y = 0; y < src.cropHeight(); ++y) {
+        for (size_t x = 0; x < src.cropWidth(); x++) {
+            signed y1 = (signed)src_y[x] - 16;
+            signed u = (signed)src_u[x / 2] - 128;
+            signed v = (signed)src_v[x / 2] - 128;
+
+            signed u_b = u * 517;
+            signed u_g = -u * 100;
+            signed v_g = -v * 208;
+            signed v_r = v * 409;
+
+            signed tmp1 = y1 * 298;
+            signed b1 = (tmp1 + u_b) / 256;
+            signed g1 = (tmp1 + v_g + u_g) / 256;
+            signed r1 = (tmp1 + v_r) / 256;
+
+	    uint32_t rgb1 =
+                  (kAdjustedClip[r1] << 0)
+                | (kAdjustedClip[g1] << 8)
+                | (kAdjustedClip[b1] << 16)
+                | (0xFF << 24);
+                                               
+            dst_ptr[x] = rgb1;
+        }
+
+        src_y += src.mWidth;
+
+        if (y & 1) {
+            src_u += src.mWidth / 2;
+            src_v += src.mWidth / 2;
+        }
+
+        dst_ptr += dst.mWidth;
+    }
+
+    return OK;
+}
+#ifdef MTK_USEDPFRMWK
+void ColorConverter::dumpColorConverterData(const char * filepath, const void * buffer, size_t size,const char * propty) {
+
+    char value[PROPERTY_VALUE_MAX];
+    property_get(propty, value, "0");
+    int bflag=atoi(value);
+	
+    if (bflag) {
+       FILE * fp= fopen (filepath, "w");
+       if (fp!=NULL) {
+            fwrite(buffer,size,1,fp);
+            fclose(fp);
+       } else {
+            ALOGV("dump %s fail",propty);
+       }
+    }
+}
+#endif
+#endif
 }  // namespace android

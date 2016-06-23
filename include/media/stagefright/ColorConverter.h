@@ -25,6 +25,9 @@
 
 #include <OMX_Video.h>
 
+#ifdef MTK_HARDWARE
+#include <ui/PixelFormat.h>
+#endif
 namespace android {
 
 struct ColorConverter {
@@ -78,6 +81,19 @@ private:
 
     status_t convertTIYUV420PackedSemiPlanar(
             const BitmapParams &src, const BitmapParams &dst);
+
+#ifdef MTK_HARDWARE
+    status_t convertYUVToRGBHW(const BitmapParams &src, const BitmapParams &dst);
+    status_t convertYUV420PlanarToABGR8888(const BitmapParams &src, const BitmapParams &dst);
+#ifndef MTK_USEDPFRMWK
+    bool HWYUVToRGBConversion(const BitmapParams &src, const BitmapParams &dst);
+#endif
+#ifdef MTK_USEDPFRMWK
+	void dumpColorConverterData(const char * filepath, const void * buffer, size_t size,const char * propty);
+#endif
+    bool SWYUVToRGBConversion(const BitmapParams &src, const BitmapParams &dst);
+    PixelFormat mPixelFormat;
+#endif
 
     ColorConverter(const ColorConverter &);
     ColorConverter &operator=(const ColorConverter &);

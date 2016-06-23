@@ -904,6 +904,24 @@ status_t ACodec::setupNativeWindowSizeFormatAndUsage(
         return err;
     }
 
+#ifdef MTK_HARDWARE
+        uint32_t eHalColorFormat = HAL_PIXEL_FORMAT_YV12;
+        switch (def.format.video.eColorFormat) {
+            case OMX_COLOR_FormatYUV420Planar:
+                eHalColorFormat = HAL_PIXEL_FORMAT_I420;
+                break;
+            case OMX_MTK_COLOR_FormatYV12:                  
+                eHalColorFormat = HAL_PIXEL_FORMAT_YV12;
+                break;
+            case OMX_COLOR_FormatVendorMTKYUV:                               
+                eHalColorFormat = HAL_PIXEL_FORMAT_NV12_BLK;
+                break;
+            default:
+                eHalColorFormat = HAL_PIXEL_FORMAT_I420;
+                break;           
+        }
+#endif //MTK_HARDWARE
+
     OMX_U32 usage = 0;
     err = mOMX->getGraphicBufferUsage(mNode, kPortIndexOutput, &usage);
     if (err != 0) {
@@ -953,7 +971,11 @@ status_t ACodec::setupNativeWindowSizeFormatAndUsage(
 #ifdef USE_SAMSUNG_COLORFORMAT
             eNativeColorFormat,
 #else
+#ifdef MTK_HARDWARE
+            eHalColorFormat,
+#else
             def.format.video.eColorFormat,
+#endif
 #endif
             mRotationDegrees,
             usage);
